@@ -1,0 +1,5 @@
+MANIFEST
+LICENSE
+Makefile.PL
+README.md
+lib/Test/AutoRest.pm
