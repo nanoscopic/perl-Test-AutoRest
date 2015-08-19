@@ -123,7 +123,7 @@ sub load_tests {
     }
     
     #my $tests = forcearray( $xml->{'test'} );
-    #print Dumper( $xml );
+    #print Dumper( $tests );
     $tests = unmix( $tests );
     #print Dumper( $tests );
     return $tests;
@@ -171,6 +171,7 @@ sub fill_defines {
 
 sub deep_replace_in_values {
     my ( $node, $hash ) = @_;
+    
     for my $key ( keys %$node ) {
         my $sv = $node->{ $key };
         my $ref = ref( $sv );
@@ -185,7 +186,19 @@ sub deep_replace_in_values {
         elsif( $key eq 'value' ) {
             # val is $sv
             if( $sv ) {
-                $sv =~ s/#([a-zA-Z0-9_]+)#/hash_replace($1,$hash)/e;
+                if( $sv =~ m/^#(.+)#/ ) {
+                    my $hname = $1;
+                    if( ! defined $hash->{ $hname } ) {
+                      print "Cannot find variable: $hname\n";
+                      $sv = '';
+                    }
+                    else {
+                        $sv = $hash->{ $hname };
+                    }
+                }
+                else {
+                    $sv =~ s/#([a-zA-Z0-9_]+)#/hash_replace($1,$hash)/e;
+                }
                 $node->{ $key } = $sv;
             }
         }
@@ -705,6 +718,10 @@ sub x_query {
     }
 }
 
+#<db_delete table="t1">
+#        <join table="t2" on="t3_id" as="t3_table" />
+#        <where blah="blah2" t3_table.blah4="blah5" />
+#    </db_delete>
 sub x_delete {
     my $test = shift; my %ops = ( @_ );
     my $sys = $ops{'system'};
@@ -712,8 +729,12 @@ sub x_delete {
     my $psql = $sys->new_sql_object();
     my $where = dclone( $test->{'where'} );
     $sys->fill_values_in_hash( $where );
-    my $log = $psql->delete_cascade( $test->{'table'}, %$where );
-    print join( "\n", @$log ), "\n";
+    my $join = 0;
+    if( $test->{'join'} ) {
+      $join = forcearray( $test->{'join'} );
+    }
+    my $log = $psql->delete_cascade( table => $test->{'table'}, where => $where, join => $join );
+    print "\n".join( "\n", @$log ), "\n";
     return 1;
 }
 
