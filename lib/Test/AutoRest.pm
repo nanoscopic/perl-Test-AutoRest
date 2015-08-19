@@ -10,13 +10,14 @@ use XML::Bare qw/forcearray xval/;
 use Data::Dumper;
 use URI::Encode qw/uri_encode/;
 use lib '.';
-use TestPSQL;
+use Pg::Helper;
 use TestFuncs;
 use Text::Template qw/fill_in_string/;
 use JSON::XS;
 use Storable qw/dclone/;
 use strict;
 use warnings;
+use File::Basename;
 
 my $debug = 0;
 my $macros = 0;
@@ -28,6 +29,8 @@ sub new {
     my %params = ( @_ );
     
     my $self = {};
+    $self = bless $self, $class;
+    
     if( -e 'cookies.txt' ) {
         `rm cookies.txt`;
     }
@@ -42,10 +45,21 @@ sub new {
     my $loghandle;
     open( $loghandle, ">>log.xml" ) or die "Cannot open log.xml for writing";
     $self->{'loghandle'} = $loghandle;
-    $self->{'testfile'} = $params{'file'};
+    my $files;
+    if( $params{'files'} ) {
+      $files = $params{'files'};
+    }
+    if( $params{'file'} ) {
+      $files = [ $params{'file'} ];
+    }
+    $self->{'testfiles'} = $files;
+    if( $params{'config'} ) {
+      my ( $ob, $xml ) = XML::Bare->simple( file => $params{'config'} );
+      $self->apply_config( $xml->{'xml'} );
+    }
     $self->{'vars'} = {};
     
-    return bless $self, $class;
+    return $self;
 }
 
 sub DESTROY {
@@ -53,40 +67,46 @@ sub DESTROY {
     close( $self->{'loghandle'} );
 }
 
-sub run {
-    my $self = shift;
-    my $tests = $self->load_tests();
-    
-    my $config = $self->{'config'};
-    my $httpconf = $config->{'http'};
+sub apply_config {
+  my ( $self, $config ) = @_;
+  
+  #print Dumper( $config );
+  $self->{'config'} = $config;
+  my $httpconf = $config->{'http'};
+  if( $httpconf && $httpconf->{'header'} ) {
     my $headers = forcearray( $httpconf->{'header'} );
     my $ua = $self->{'ua'};
     for my $header ( @$headers ) {
-        $ua->default_header( $header->{'name'} => $header->{'val'} );
+      $ua->default_header( $header->{'name'} => $header->{'val'} );
     }
-    
-    $self->run_tests( $tests );
+  }
+}
+
+sub run {
+    my $self = shift;
+    my $filesfull = $self->{'testfiles'};
+    for my $filefull ( @$filesfull ) {
+      my ( $file, $path, $ext ) = fileparse( $filefull );
+      my $tests = $self->load_tests( $filefull );
+      $self->run_tests( $tests, $path );
+    }
 }
 
 sub load_tests {
-    my $self = shift;
-    my ( $ob, $xml ) = XML::Bare->new( file => $self->{'testfile'} );
+    my ( $self, $file ) = @_;
+    my ( $ob, $xml ) = XML::Bare->new( file => $file );
+    $xml = $xml->{'xml'};
     
     # We cannot simplify here, because that would strip _pos from the nodes, and cause unmix below to fail
     #$xml = XML::Bare::Object::simplify( $xml->{'xml'} );
     
-    my $tests = $xml->{'xml'}{'tests'};
+    my $tests = $xml;
     
-    my $config = $xml->{'xml'}{'config'};
+    my $config = $xml->{'config'};
     if( $config ) {
         $config = XML::Bare::Object::simplify( $config );
-        $self->{'config'} = $config;
-        #print Dumper( $config );
-        #$local = $config->{'local'};
-        #$base = $config->{'base'};
-    }
-    else {
-        die "No config section in loaded xml";
+        $self->apply_config( $config );
+        delete $xml->{'config'};
     }
     
     if( $tests->{'macro'} ) {
@@ -110,7 +130,7 @@ sub load_tests {
 }
 
 sub run_macro {
-    my ( $self, $name, $data ) = @_;
+    my ( $self, $name, $data, $path ) = @_;
     my $macro = $macrohash{ $name };
     my $defines = forcearray( $macro->{'define'} );
     # recursive scan through macro and replace all ## things with their defined values
@@ -130,7 +150,7 @@ sub run_macro {
     #print Dumper( $clone );
     
     print " Is macro\n";
-    $self->run_tests( $clone );
+    $self->run_tests( $clone, $path );
     
     1;
 }
@@ -185,11 +205,13 @@ sub hash_replace {
 sub new_sql_object {
     my $self = shift;
     my $dbconf = $self->{'config'}{'db'};
-    return TestPSQL->new( $dbconf );
+    return Pg::Helper->new( $dbconf );
 }
 
 sub run_tests {
-    my ( $self, $tests ) = @_;
+    my ( $self, $tests, $path ) = @_;
+    
+    my $success = 1;
     for my $testn ( @$tests ) {
         my $name = $testn->{'name'};
         my $test = XML::Bare::Object::simplify( $testn->{'node'} );
@@ -200,12 +222,13 @@ sub run_tests {
             db_query => \&x_query,
             query => \&x_query,
             db_delete => \&x_delete,
-            db_check_exists => \&x_check_exists
+            db_check_exists => \&x_check_exists,
+            include => \&x_include
         );
         
         my $result;
         if( $macrohash{ $name } ) {
-            $result = $self->run_macro( $name, $test );
+            $result = $self->run_macro( $name, $test, $path );
         }
         else {
             my $funcref = $builtin{ $name } || \&{ "TestFuncs::x_$name" };
@@ -213,11 +236,13 @@ sub run_tests {
                 $test, 
                 vars => $self->{'vars'}, 
                 config => $self->{'config'},
-                system => $self
+                system => $self,
+                path => $path
             );
         }
         
         if( !$result ) {
+            $success = 0;
             print "failed\n";
             last;
         }
@@ -241,6 +266,7 @@ sub run_tests {
             }
         }
     }
+    return $success;
 }
 
 sub resp_output {
@@ -590,6 +616,24 @@ sub unmix {
     return \@res;
 }
 
+sub x_include {
+  my $test = shift;  my %ops = ( @_ );
+  my $system = $ops{'system'}; # config and vars also available
+  my $path = $ops{'path'};
+  
+  my $filerel = $test->{'file'};
+  my $filefull = "$path/$filerel";
+  if( ! -e $filefull ) {
+    print "Cannot include file '$filefull'\n";
+    return 0;
+  }
+  
+  my $tests = $system->load_tests( $filefull );
+  my ( $file, $newpath, $ext ) = fileparse( $filefull );
+  my $result = $system->run_tests( $tests, $newpath );
+  return $result;
+}
+
 # Shift around stored values
 sub x_store {
     my $test = shift; my %ops = ( @_ );
@@ -598,7 +642,7 @@ sub x_store {
     
     my $to = $test->{'to'};
         
-    if( defined $test->{'val'} ) {
+    if( defined $test->{'val'} || !$test->{'from'} ) {
         my $val = $test->{'val'};
         $val = $ops{'system'}->fill_value( $val );
         $vars->{ $to } = $val;# we should evaluate this in text::template
@@ -634,6 +678,13 @@ sub x_query {
     for my $one ( @$fetch ) {
         my $col = $one->{'col'};
         push( @$fetcharr, $col );
+    }
+    
+    for my $key ( keys %$where ) {
+        my $val = $where->{ $key };
+        if( $val eq 'null' ) {
+            $where->{ $key } = { special => 'null' };
+        }
     }
     
     my $data = $psql->query( $test->{'table'}, $fetcharr, $where, limit => 1 );
