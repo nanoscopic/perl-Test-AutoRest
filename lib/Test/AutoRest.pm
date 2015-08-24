@@ -57,7 +57,7 @@ sub new {
       my ( $ob, $xml ) = XML::Bare->simple( file => $params{'config'} );
       $self->apply_config( $xml->{'xml'} );
     }
-    $self->{'vars'} = {};
+    $self->{'vars'} = { sys => $self };
     
     return $self;
 }
@@ -700,7 +700,10 @@ sub x_query {
         }
     }
     
-    my $data = $psql->query( $test->{'table'}, $fetcharr, $where, limit => 1 );
+    my $join = 0;
+    if( $test->{'join'} ) { $join = forcearray( $test->{'join'} ); }
+    
+    my $data = $psql->query( $test->{'table'}, $fetcharr, $where, limit => 1, join => $join );
     
     if( $data ) {
         my $vars = {};
